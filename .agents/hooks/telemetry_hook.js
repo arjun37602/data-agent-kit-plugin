@@ -357,6 +357,34 @@ var GOOGLE_MCP_SERVERS_REGEX = new RegExp(
   `(^|[_-])(${GOOGLE_MCP_SERVERS.join("|")})(_(remote|toolbox))?$`
 );
 var DAK_MCP_SERVER_REGEX = /(^|[_-])dak-/;
+var KNOWN_GOOGLE_SERVERS = [
+  // VS Code extension remote servers (from constants.ts MCP_SERVICES)
+  "datacloud_knowledge_catalog_remote",
+  "datacloud_bigtable-admin_remote",
+  "datacloud_bigtable-data_remote",
+  "datacloud_bigquery_remote",
+  "datacloud_dataproc_remote",
+  "datacloud_cloud-sql_remote",
+  "datacloud_spanner_remote",
+  "datacloud_alloydb_remote",
+  "datacloud_gcs_remote",
+  // VS Code built-in servers
+  "visualization",
+  "notebooks",
+  "notebook",
+  // DAK plugin servers (from dak.ts / mcp.json)
+  "dak-bigtable-data",
+  "dak-notebook",
+  "dak-bigquery",
+  "dak-bigtable",
+  "dak-cloudsql",
+  "dak-alloydb",
+  "dak-spanner",
+  "dak-spark",
+  "dak-viz",
+  "dak-gcs",
+  "dak-kc"
+].sort((a, b) => b.length - a.length);
 var VSCODE_MCP_SERVER_PREFIX_MAP = {
   // Notebooks & Visualization:
   "mcp_notebooks_": "notebooks",
@@ -376,7 +404,7 @@ var McpParser = class {
     if (isCursorPreToolUseMcpName(payload["tool_name"])) {
       return void 0;
     }
-    return parsePayloadCursorMcp(payload) || parsePayloadGemini(payload) || parsePayloadVscodeChat(payload) || parsePayloadClaudeOrCodex(payload);
+    return parsePayloadCursorMcp(payload) || parsePayloadGemini(payload) || parsePayloadVscodeChat(payload) || parsePayloadClaudeOrCodex(payload) || parsePayloadCopilotAgent(payload);
   }
 };
 function isCursorPreToolUseMcpName(toolName) {
@@ -459,6 +487,32 @@ function parsePayloadClaudeOrCodex(payload) {
   }
   return void 0;
 }
+function parsePayloadCopilotAgent(payload) {
+  const rawName = payload["toolName"];
+  if (typeof rawName !== "string") return void 0;
+  for (const server of KNOWN_GOOGLE_SERVERS) {
+    const token = `${server}-`;
+    const idx = rawName.indexOf(token);
+    if (idx === 0 || idx > 0 && (rawName[idx - 1] === "_" || rawName[idx - 1] === "-")) {
+      const toolName = rawName.substring(idx + token.length);
+      if (toolName) {
+        return {
+          serverName: server,
+          toolName,
+          isGoogleTool: true
+        };
+      }
+    }
+  }
+  const sep = rawName.lastIndexOf("-");
+  if (sep <= 0 || sep === rawName.length - 1) return void 0;
+  const serverName = rawName.substring(0, sep);
+  return {
+    serverName,
+    toolName: rawName.substring(sep + 1),
+    isGoogleTool: isGoogleMcpServer(serverName)
+  };
+}
 addProviders([{ key: McpParser, factory: () => new McpParser() }]);
 
 // cloud/developer_experience/datacloud_vscode/agents/hooks/skill_parser.ts
@@ -494,21 +548,34 @@ var SkillParser = class {
    *     "skill": "dak:notebook_guidance"
    *   }
    * }
+   *
+   * Example payload from the Copilot agent runtime (bare skill id):
+   * {
+   *   "toolName": "skill",
+   *   "toolArgs": {
+   *     "skill": "bigquery-sql"
+   *   }
+   * }
    */
   parseSkillToolArgs(toolArgs) {
     const skillId = toolArgs["skill"] || toolArgs["command"];
-    if (typeof skillId === "string" && skillId) {
-      if (skillId.startsWith("dak:")) {
-        const colonIndex = skillId.indexOf(":");
-        const rawSkillName = colonIndex !== -1 ? skillId.substring(colonIndex + 1) : skillId;
-        const skillName = rawSkillName.toLowerCase();
-        return {
-          skillName,
-          isGooglePublisher: this.allowedSkills.has(skillName)
-        };
-      }
+    if (typeof skillId !== "string" || !skillId) {
+      return void 0;
     }
-    return void 0;
+    let rawSkillName;
+    if (skillId.startsWith("dak:")) {
+      rawSkillName = skillId.substring("dak:".length);
+    } else if (typeof toolArgs["skill"] === "string" && !skillId.includes(":")) {
+      rawSkillName = skillId;
+    }
+    if (!rawSkillName) {
+      return void 0;
+    }
+    const skillName = rawSkillName.toLowerCase();
+    return {
+      skillName,
+      isGooglePublisher: this.allowedSkills.has(skillName)
+    };
   }
   /**
    * Parses commands that might contain skill file paths (e.g. from Bash tool).
@@ -632,6 +699,9 @@ function extractToolArgs(payload) {
   }
   if ("tool_input" in payload) {
     return parseRecord(payload["tool_input"]);
+  }
+  if ("toolArgs" in payload) {
+    return parseRecord(payload["toolArgs"]);
   }
   return void 0;
 }
@@ -1101,6 +1171,9 @@ var TelemetryHook = class {
     const currentIdeName = this.processEnv.env["DATA_CLOUD_CURR_IDE_NAME"];
     if (currentIdeName) {
       return currentIdeName;
+    }
+    if (this.processEnv.env["AI_AGENT"] === "github_copilot_vscode_agent") {
+      return "visualstudiocode";
     }
     if (this.processEnv.env["ANTIGRAVITY_EDITOR_APP_ROOT"]) {
       return "antigravityide";
